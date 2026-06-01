@@ -48,14 +48,6 @@ AI 答题是可选功能，需要配置 API 才能使用。推荐使用 **DeepSe
 | Anthropic | `https://api.anthropic.com/v1/messages` | 需要适配器 |
 | 其他兼容 | 任意 OpenAI 兼容地址 | 任意模型 |
 
-> 使用 OpenAI 兼容 API 格式（Chat Completions），支持任何兼容服务。
-
-### 费用说明
-
-- 一次答题约消耗 200~500 token
-- DeepSeek：约 0.002 元/题
-- OpenAI gpt-4o-mini：约 0.002 元/题
-- **一个课程 50 道题大约 0.1 元**
 
 ## 使用
 
