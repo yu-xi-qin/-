@@ -23,7 +23,7 @@
 
 1. 安装浏览器扩展 **Tampermonkey**
 2. 打开管理面板 → **"添加新脚本"**
-3. 粘贴 `yuketang-automator.user.js` 完整内容，保存
+3. 粘贴 `yuketang-automator.js` 完整内容，保存
 4. 访问 https://changjiang.yuketang.cn/
 
 ## AI 答题配置
