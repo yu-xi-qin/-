@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         长江雨课堂自动刷课助手
 // @namespace    https://changjiang.yuketang.cn/
-// @version      2.9.0
+// @version      3.0.0
 // @description  自动刷视频、做试题，支持倍速播放与AI智能答题（判断题全文本回退）
 // @author       yuketang-helper
 // @match        https://changjiang.yuketang.cn/*
@@ -30,6 +30,7 @@
     defaultSpeed: 2.0,
     defaultMuted: true,
     autoNextChapter: true,
+    autoCrossCourse: true,     // 完成一门课后自动进入下一门
     answerRetryLimit: 3,
     checkInterval: 1000,       // 主循环间隔 ms
     videoCheckInterval: 500,   // 视频检测间隔 ms
@@ -141,6 +142,7 @@
         speed: CONFIG.defaultSpeed,
         muted: CONFIG.defaultMuted,
         autoNext: CONFIG.autoNextChapter,
+        crossCourse: CONFIG.autoCrossCourse || true,
       });
     }
     static setSettings(settings) {
@@ -965,7 +967,7 @@ ${formatInst}
         <div id="ykh-header">
           <div class="ykh-logo">
             <span>🎓 雨课堂助手</span>
-            <span class="ykh-badge">v2.5</span>
+            <span class="ykh-badge">v3.0</span>
           </div>
           <span id="ykh-minimize" title="最小化">−</span>
         </div>
@@ -990,6 +992,20 @@ ${formatInst}
               <input type="checkbox" id="ykh-auto-next" ${Storage.getSettings().autoNext ? 'checked' : ''}>
               <span class="ykh-slider"></span>
             </label>
+          </div>
+          <div class="ykh-row">
+            <label>跨课程模式</label>
+            <label class="ykh-toggle">
+              <input type="checkbox" id="ykh-cross-course" ${Storage.getSettings().crossCourse ? 'checked' : ''}>
+              <span class="ykh-slider"></span>
+            </label>
+            <span style="font-size:11px;color:#999;margin-left:4px;">完成后自动换课</span>
+          </div>
+          <div id="ykh-video-progress" style="display:none; padding:6px 10px; background:#f0f7ff; border-radius:6px; font-size:11px; color:#1a73e8;">
+            <div style="display:flex;justify-content:space-between;">
+              <span>📺 视频进度</span>
+              <span id="ykh-video-progress-text">--</span>
+            </div>
           </div>
           <div id="ykh-ai-section">
             <div id="ykh-ai-header" style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;padding:4px 0;">
@@ -1085,6 +1101,11 @@ ${formatInst}
 
       document.getElementById('ykh-auto-next').addEventListener('change', (e) => {
         Storage.setSettings({ autoNext: e.target.checked });
+      });
+
+      document.getElementById('ykh-cross-course').addEventListener('change', (e) => {
+        Storage.setSettings({ crossCourse: e.target.checked });
+        this.emit('crossCourseChange', e.target.checked);
       });
 
       // AI 设置折叠
@@ -1252,6 +1273,33 @@ ${formatInst}
       return chk ? chk.checked : CONFIG.autoNextChapter;
     }
 
+    isCrossCourse() {
+      const chk = document.getElementById('ykh-cross-course');
+      return chk ? chk.checked : true;
+    }
+
+    updateVideoProgress(info) {
+      const el = document.getElementById('ykh-video-progress');
+      const textEl = document.getElementById('ykh-video-progress-text');
+      if (!el || !textEl) return;
+      if (info && (info.progressText || info.duration > 0)) {
+        el.style.display = 'block';
+        if (info.progressText) {
+          textEl.textContent = info.progressText;
+        } else if (info.duration > 0) {
+          const pct = Math.round((info.currentTime / info.duration) * 100);
+          const fmt = (t) => {
+            const m = Math.floor(t / 60);
+            const s = Math.floor(t % 60);
+            return `${m}:${String(s).padStart(2, '0')}`;
+          };
+          textEl.textContent = `${pct}% (${fmt(info.currentTime)}/${fmt(info.duration)})`;
+        }
+      } else {
+        el.style.display = 'none';
+      }
+    }
+
     _makeDraggable(header, panel) {
       let offsetX = 0, offsetY = 0, startX = 0, startY = 0, dragging = false;
 
@@ -1303,7 +1351,7 @@ ${formatInst}
   }
 
   // ============================================================
-  //  VIDEO HANDLER
+  //  VIDEO HANDLER (optimized with platform-specific selectors)
   // ============================================================
   class VideoHandler {
     constructor(ui) {
@@ -1312,21 +1360,76 @@ ${formatInst}
       this.observer = null;
       this.isHandling = false;
       this.watchInterval = null;
+      this.muteGuardInterval = null;
       this.lastVideoSrc = '';
+      this.videoStartTime = 0;
+      this.maxVideoWaitMs = 40 * 60 * 1000;
+      this._playAttempts = 0;
+      this._lastProgress = '';
+      this._progressStuckCount = 0;
     }
 
     start() {
       this.isHandling = true;
+      this._playAttempts = 0;
+      this._lastProgress = '';
+      this._progressStuckCount = 0;
       this.scanAndHandle();
       this.observeVideoChanges();
       this.watchInterval = setInterval(() => this.scanAndHandle(), CONFIG.videoCheckInterval);
+      this._startMuteGuardian();
     }
 
     stop() {
       this.isHandling = false;
       if (this.observer) { this.observer.disconnect(); this.observer = null; }
       if (this.watchInterval) { clearInterval(this.watchInterval); this.watchInterval = null; }
+      if (this.muteGuardInterval) { clearInterval(this.muteGuardInterval); this.muteGuardInterval = null; }
       this.currentVideo = null;
+      this._playAttempts = 0;
+      this._progressStuckCount = 0;
+    }
+
+    // 静音守护：每500ms检查一次（前2分钟），之后每3秒检查
+    _startMuteGuardian() {
+      if (this.muteGuardInterval) clearInterval(this.muteGuardInterval);
+      let fastTicks = 0;
+      const MAX_FAST = 240;
+
+      this.muteGuardInterval = setInterval(() => {
+        if (!this.isHandling) return;
+        fastTicks++;
+
+        // 平台专用静音按钮 (长江雨课堂 .xt_video_player_volume)
+        const muteIcon = document.querySelector('.xt_video_player_volume .xt_video_player_common_icon');
+        if (muteIcon) {
+          const isMuted = muteIcon.classList.contains('xt_video_player_common_icon_muted');
+          if (!isMuted && this.ui.isMuted()) {
+            logger.debug('Video', '平台静音按钮未静音，点击静音');
+            muteIcon.click();
+          }
+        }
+
+        // 同时设置原生 video 属性
+        if (this.ui.isMuted()) {
+          document.querySelectorAll('video').forEach(v => { v.muted = true; v.volume = 0; });
+        }
+
+        if (fastTicks >= MAX_FAST) {
+          clearInterval(this.muteGuardInterval);
+          this.muteGuardInterval = setInterval(() => {
+            if (!this.isHandling) return;
+            const mi = document.querySelector('.xt_video_player_volume .xt_video_player_common_icon');
+            if (mi && !mi.classList.contains('xt_video_player_common_icon_muted') && this.ui.isMuted()) {
+              mi.click();
+            }
+            if (this.ui.isMuted()) {
+              document.querySelectorAll('video').forEach(v => { v.muted = true; v.volume = 0; });
+            }
+          }, 3000);
+          logger.debug('Video', '静音守护转入低频模式(3s)');
+        }
+      }, 500);
     }
 
     observeVideoChanges() {
@@ -1339,10 +1442,9 @@ ${formatInst}
 
     scanAndHandle() {
       if (!this.isHandling) return;
-      // 先尝试直接找 video 标签
+
       let video = document.querySelector('video');
       if (!video) {
-        // 尝试在 iframe 中查找
         const iframes = document.querySelectorAll('iframe');
         for (const iframe of iframes) {
           try {
@@ -1351,101 +1453,104 @@ ${formatInst}
               video = iframeDoc.querySelector('video');
               if (video) break;
             }
-          } catch (e) {
-            // 跨域 iframe 无法访问
-          }
+          } catch (e) { /* cross-origin */ }
         }
       }
 
       if (video && video !== this.currentVideo) {
         this.currentVideo = video;
+        this._playAttempts = 0;
+        this._progressStuckCount = 0;
+        this._lastProgress = '';
         this.setupVideo(video);
       }
 
-      // 确保当前视频在播放
       if (this.currentVideo) {
         this.ensurePlaying();
+        this._checkProgressStuck();
       }
     }
 
     setupVideo(video) {
       logger.info('Video', '发现视频元素', video.src || '(无src)');
       this.lastVideoSrc = video.src || '';
+      this.videoStartTime = Date.now();
 
       const speed = this.ui.getSpeed();
       const muted = this.ui.isMuted();
 
+      this._muteViaPlatform();
       video.muted = muted;
+      video.volume = muted ? 0 : 1;
       video.playbackRate = speed;
 
-      // 移除视频上的事件监听器（避免重复绑定）
-      const events = ['ended', 'pause', 'play', 'seeked', 'timeupdate'];
-      events.forEach(evt => {
-        video.removeEventListener(evt, this._onVideoEvent);
-        video.addEventListener(evt, this._onVideoEvent.bind(this));
-      });
-
-      // 尝试播放
-      this.playVideo(video);
-
-      this.ui.log(`检测到视频，倍速 ${speed}x${muted ? '，已静音' : ''}`);
-    }
-
-    _onVideoEvent(e) {
-      const video = e.target;
-      if (!this.isHandling || video !== this.currentVideo) return;
-
-      switch (e.type) {
-        case 'ended':
-          logger.info('Video', '视频播放完毕');
-          this.ui.log('当前视频播放完成');
-          this.currentVideo = null;
-          // 通知外部可以导航了
-          if (this._onVideoEndedCallback) {
-            this._onVideoEndedCallback();
-          }
-          break;
-        case 'pause':
-          // 如果不是用户主动暂停，尝试恢复播放
-          if (this.isHandling && video.paused && !video.ended) {
-            const speed = this.ui.getSpeed();
-            const muted = this.ui.isMuted();
-            video.playbackRate = speed;
-            video.muted = muted;
-            setTimeout(() => {
-              if (video.paused && this.isHandling) {
-                video.play().catch(() => {});
-              }
-            }, 200);
-          }
-          break;
-        case 'seeked':
-          // 跳过静音检测后恢复静音和倍速
+      if (!video._ykhEventsBound) {
+        video._ykhEventsBound = true;
+        video.addEventListener('ended', () => this._onVideoEnded());
+        video.addEventListener('pause', () => this._onVideoPause());
+        video.addEventListener('play', () => {
+          this.videoStartTime = Date.now();
+          this._playAttempts = 0;
+        });
+        video.addEventListener('seeked', () => {
           if (this.isHandling) {
             video.muted = this.ui.isMuted();
             video.playbackRate = this.ui.getSpeed();
           }
-          break;
+        });
+      }
+
+      this._smartPlay(video);
+
+      const progressText = this._getProgressText();
+      this.ui.log(`🎬 视频 | 倍速${speed}x | 静音${muted ? '✅' : '❌'} | 进度${progressText || '未知'}`);
+    }
+
+    // 平台专用静音按钮
+    _muteViaPlatform() {
+      if (!this.ui.isMuted()) return;
+      const muteIcon = document.querySelector('.xt_video_player_volume .xt_video_player_common_icon');
+      if (muteIcon && !muteIcon.classList.contains('xt_video_player_common_icon_muted')) {
+        muteIcon.click();
       }
     }
 
-    playVideo(video) {
+    // 智能播放：先点击平台播放按钮，再调用 video.play()
+    _smartPlay(video) {
       if (!video) return;
-      const speed = this.ui.getSpeed();
-      const muted = this.ui.isMuted();
-      video.muted = muted;
-      video.playbackRate = speed;
+
+      const playBtnSelectors = [
+        '.xt_video_player_play_btn',
+        '.xt_video_player_play',
+        '.vjs-big-play-button',
+        '[class*="play-btn"]',
+        '[class*="play_btn"]',
+        '[class*="playButton"]',
+        '.xgplayer-start',
+        '[class*="video-play"]',
+      ];
+      for (const sel of playBtnSelectors) {
+        const btn = document.querySelector(sel);
+        if (btn && btn.offsetParent !== null) {
+          DOM.safeClick(btn);
+          break;
+        }
+      }
+
+      video.muted = this.ui.isMuted();
+      video.playbackRate = this.ui.getSpeed();
 
       if (video.paused) {
         const playPromise = video.play();
         if (playPromise) {
           playPromise.catch((err) => {
-            logger.warn('Video', '播放失败，尝试再次播放', err.message);
-            // 有些平台需要用户先点击页面
+            logger.warn('Video', '播放失败:', err.message);
             setTimeout(() => {
-              video.muted = muted;
-              video.playbackRate = speed;
-              video.play().catch(() => {});
+              if (this.isHandling && video.paused && !video.ended) {
+                video.muted = true;
+                video.playbackRate = this.ui.getSpeed();
+                video.play().catch(() => {});
+              }
             }, 1000);
           });
         }
@@ -1458,56 +1563,130 @@ ${formatInst}
       const speed = this.ui.getSpeed();
       const muted = this.ui.isMuted();
 
-      if (video.muted !== muted) video.muted = muted;
+      if (video.muted !== muted) {
+        video.muted = muted;
+        if (muted) this._muteViaPlatform();
+      }
       if (video.playbackRate !== speed) video.playbackRate = speed;
+
       if (video.paused && !video.ended && this.isHandling) {
-        video.play().catch(() => {});
+        this._playAttempts++;
+        if (this._playAttempts % 5 === 0) {
+          this._smartPlay(video);
+        } else {
+          video.play().catch(() => {});
+        }
       }
     }
 
-    updateSpeed(speed) {
-      if (this.currentVideo) {
-        this.currentVideo.playbackRate = speed;
+    // 平台进度文本: .progress-wrap .text
+    _getProgressText() {
+      const progressEl = document.querySelector('.progress-wrap .text');
+      if (progressEl) return progressEl.textContent.trim();
+
+      const altSelectors = [
+        '.xt_video_progress_text',
+        '[class*="progress"] [class*="text"]',
+        '[class*="current-time"]',
+        '.xgplayer-progress-tip',
+        '[class*="video-time"]',
+      ];
+      for (const sel of altSelectors) {
+        const el = document.querySelector(sel);
+        if (el) return el.textContent.trim();
       }
-      // 同时更新所有页面上的视频
-      document.querySelectorAll('video').forEach(v => { v.playbackRate = speed; });
-      try {
-        document.querySelectorAll('iframe').forEach(iframe => {
-          try {
-            const doc = iframe.contentDocument || iframe.contentWindow?.document;
-            if (doc) doc.querySelectorAll('video').forEach(v => { v.playbackRate = speed; });
-          } catch (e) {}
-        });
-      } catch (e) {}
+      return '';
     }
 
-    updateMuted(muted) {
-      if (this.currentVideo) {
-        this.currentVideo.muted = muted;
+    // 综合判断视频是否完成（多信号）
+    isVideoFinished() {
+      // 信号1: 原生 video.ended
+      if (this.currentVideo && this.currentVideo.ended) return true;
+
+      // 信号2: 进度文本显示100%
+      const progressText = this._getProgressText();
+      if (progressText && progressText.includes('100%')) return true;
+
+      // 信号3: 页面出现 .finish 完成标记
+      if (document.querySelector('.finish')) return true;
+
+      // 信号4: 播放到接近结尾（剩余<0.5秒）
+      if (this.currentVideo && this.currentVideo.duration > 0) {
+        if (this.currentVideo.duration - this.currentVideo.currentTime < 0.5) return true;
       }
-      document.querySelectorAll('video').forEach(v => { v.muted = muted; });
-      try {
-        document.querySelectorAll('iframe').forEach(iframe => {
-          try {
-            const doc = iframe.contentDocument || iframe.contentWindow?.document;
-            if (doc) doc.querySelectorAll('video').forEach(v => { v.muted = muted; });
-          } catch (e) {}
-        });
-      } catch (e) {}
+
+      // 信号5: 超时保护
+      if (this.videoStartTime > 0 && (Date.now() - this.videoStartTime) > this.maxVideoWaitMs) {
+        logger.warn('Video', '视频超时，视为完成');
+        return true;
+      }
+
+      return false;
+    }
+
+    // 检测进度是否卡住
+    _checkProgressStuck() {
+      const progressText = this._getProgressText();
+      if (progressText && progressText === this._lastProgress) {
+        this._progressStuckCount++;
+        if (this._progressStuckCount >= 10 && this.currentVideo && this.currentVideo.paused) {
+          logger.warn('Video', '进度卡住，强制重新播放');
+          this._smartPlay(this.currentVideo);
+          this._progressStuckCount = 0;
+        }
+      } else {
+        this._lastProgress = progressText;
+        this._progressStuckCount = 0;
+      }
+    }
+
+    _onVideoEnded() {
+      logger.info('Video', '视频播放完毕');
+      this.ui.log('✅ 当前视频播放完成');
+      this.currentVideo = null;
+      if (this._onVideoEndedCallback) {
+        this._onVideoEndedCallback();
+      }
+    }
+
+    _onVideoPause() {
+      if (!this.isHandling || !this.currentVideo) return;
+      const video = this.currentVideo;
+      if (this.isVideoFinished()) {
+        if (!video.ended) {
+          logger.info('Video', '通过进度判断为完成');
+          this._onVideoEnded();
+        }
+        return;
+      }
+      if (video.paused && !video.ended) {
+        video.muted = this.ui.isMuted();
+        video.playbackRate = this.ui.getSpeed();
+        setTimeout(() => {
+          if (this.isHandling && video.paused && !video.ended) {
+            this._smartPlay(video);
+          }
+        }, 300);
+      }
     }
 
     hasActiveVideo() {
-      // 先检查当前跟踪的视频（可能在iframe中）
+      if (this.isVideoFinished()) {
+        if (this.currentVideo && !this.currentVideo.ended) {
+          this._onVideoEnded();
+        }
+        return false;
+      }
+
       if (this.currentVideo && !this.currentVideo.ended &&
           this.currentVideo.duration > 0 &&
           this.currentVideo.currentTime < this.currentVideo.duration - 0.5) {
         return true;
       }
-      // 检查主文档中的视频
+
       const videos = document.querySelectorAll('video');
       for (const v of videos) {
         if (!v.ended && v.duration > 0 && v.currentTime < v.duration - 0.5) {
-          // 更新currentVideo引用
           if (v !== this.currentVideo) {
             this.currentVideo = v;
             this.setupVideo(v);
@@ -1515,7 +1694,7 @@ ${formatInst}
           return true;
         }
       }
-      // 检查iframe中的视频
+
       const iframes = document.querySelectorAll('iframe');
       for (const iframe of iframes) {
         try {
@@ -1534,7 +1713,55 @@ ${formatInst}
           }
         } catch (e) { /* cross-origin */ }
       }
+
       return false;
+    }
+
+    updateSpeed(speed) {
+      if (this.currentVideo) this.currentVideo.playbackRate = speed;
+      document.querySelectorAll('video').forEach(v => { v.playbackRate = speed; });
+      try {
+        document.querySelectorAll('iframe').forEach(iframe => {
+          try {
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (doc) doc.querySelectorAll('video').forEach(v => { v.playbackRate = speed; });
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+
+    updateMuted(muted) {
+      if (muted) this._muteViaPlatform();
+      if (this.currentVideo) {
+        this.currentVideo.muted = muted;
+        this.currentVideo.volume = muted ? 0 : 1;
+      }
+      document.querySelectorAll('video').forEach(v => { v.muted = muted; v.volume = muted ? 0 : 1; });
+      try {
+        document.querySelectorAll('iframe').forEach(iframe => {
+          try {
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (doc) doc.querySelectorAll('video').forEach(v => { v.muted = muted; v.volume = muted ? 0 : 1; });
+          } catch (e) {}
+        });
+      } catch (e) {}
+    }
+
+    getProgressInfo() {
+      const progressText = this._getProgressText();
+      const video = this.currentVideo;
+      let currentTime = 0, duration = 0;
+      if (video && video.duration > 0) {
+        currentTime = video.currentTime;
+        duration = video.duration;
+      }
+      return {
+        progressText,
+        currentTime,
+        duration,
+        isPaused: video ? video.paused : true,
+        isFinished: this.isVideoFinished(),
+      };
     }
   }
 
@@ -3799,6 +4026,12 @@ ${formatInst}
       const nextIdx = this.currentChapterIndex >= 0 ? this.currentChapterIndex + 1 : 0;
       if (nextIdx >= this.chapterItems.length) {
         this.ui.log('已完成所有单元');
+        // 如果启用了跨课程模式，尝试进入下一门课程
+        if (this.ui.isCrossCourse()) {
+          this.ui.log('📚 当前课程所有单元完成，尝试进入下一门课程...');
+          this.markCurrentCourseFinished();
+          return await this.goToNextCourse();
+        }
         return false;
       }
 
@@ -3853,7 +4086,19 @@ ${formatInst}
 
     /** 返回课程主页 */
     async _goBackToCoursePage(urlBefore) {
-      // 策略1：找"返回"按钮
+      // 策略0：长江雨课堂专用返回按钮 .header-bar .f14.back
+      const platformBack = document.querySelector('.header-bar .f14.back');
+      if (platformBack && platformBack.offsetParent !== null) {
+        this.ui.log('点击平台返回按钮 (.header-bar .f14.back)...');
+        DOM.safeClick(platformBack);
+        await DOM.sleep(2500);
+        if (location.href !== urlBefore) {
+          this.lastUrl = location.href;
+          return true;
+        }
+      }
+
+      // 策略1：通用"返回"按钮
       const backSelectors = [
         '[class*="back"]', '[class*="return"]', '[class*="go-back"]',
         'button', 'a', 'span', 'i[class*="arrow-left"]',
@@ -3900,6 +4145,20 @@ ${formatInst}
 
     /** 展开折叠的单元 */
     async _expandUnit(unitEl) {
+      // 策略0：长江雨课堂专用 "展开" 按钮 span.blue.ml20
+      const expandSpans = document.querySelectorAll('span.blue.ml20');
+      for (const span of expandSpans) {
+        if (span.offsetParent !== null && span.textContent.includes('展开')) {
+          logger.info('Nav', '点击平台展开按钮 (span.blue.ml20)');
+          DOM.safeClick(span);
+          await DOM.sleep(1000);
+          // 检查是否展开成功
+          const newChildTasks = unitEl.querySelectorAll('a, button, [class*="task"], [class*="video"], [class*="learn"]');
+          const nowVisible = Array.from(newChildTasks).some(el => el.offsetParent !== null && DOM.getText(el).length > 1);
+          if (nowVisible) return true;
+        }
+      }
+
       // 检查是否已展开
       const cls = (unitEl.className?.toString?.() || unitEl.className || '');
       const isExpanded = unitEl.querySelector('[class*="expanded"], [class*="open"], [class*="active"]') ||
@@ -4324,6 +4583,137 @@ ${formatInst}
       return false;
     }
 
+    // ========== 跨课程导航 ==========
+    // 课程完成追踪 (localStorage)
+    static _getFinishedCourses() {
+      try { return new Set(JSON.parse(localStorage.getItem('ykh_finished_courses_v1') || '[]')); }
+      catch { return new Set(); }
+    }
+    static _saveFinishedCourses(set) {
+      try { localStorage.setItem('ykh_finished_courses_v1', JSON.stringify([...set])); }
+      catch (e) { logger.warn('Nav', '保存课程完成记录失败', e); }
+    }
+
+    /** 生成课程唯一标识 */
+    _getCourseKey() {
+      const titleEl = document.querySelector('.headerCard h1 .title-inner-wrapper, h1, [class*="course-name"], [class*="course-title"]');
+      const classEl = document.querySelector('.headerCard .classroom-name .title-inner-wrapper, [class*="classroom-name"], [class*="class-name"]');
+      const title = (titleEl?.textContent || document.title || '').trim();
+      const className = (classEl?.textContent || '').trim();
+      return `${title}|${className}`.replace(/\s+/g, ' ');
+    }
+
+    /** 标记当前课程为已完成 */
+    markCurrentCourseFinished() {
+      const key = this._getCourseKey();
+      if (!key || key === '|') return;
+      const finished = NavigationHandler._getFinishedCourses();
+      if (!finished.has(key)) {
+        finished.add(key);
+        NavigationHandler._saveFinishedCourses(finished);
+        this.ui.log(`📌 已记录完成课程: ${key.substring(0, 60)}`);
+        logger.info('Nav', '课程标记完成:', key);
+      }
+    }
+
+    /** 检查当前课程是否已完成 */
+    isCourseFinished() {
+      const key = this._getCourseKey();
+      if (!key || key === '|') return false;
+      return NavigationHandler._getFinishedCourses().has(key);
+    }
+
+    /** 返回课程列表页并进入下一门未完成课程 */
+    async goToNextCourse() {
+      this.ui.log('📚 当前课程已完成，查找下一门未完成课程...');
+      this.markCurrentCourseFinished();
+
+      // 先返回课程列表页
+      const returned = await this._returnToCourseList();
+      if (!returned) {
+        this.ui.log('⚠️ 无法返回课程列表，停止', 'warn');
+        return false;
+      }
+
+      // 在课程列表页等待加载
+      await DOM.sleep(3000);
+
+      // 尝试点击"我听的课"页签
+      this._ensureStudentTab();
+
+      // 等待课程卡片加载
+      await DOM.sleep(2000);
+
+      // 找下一门未完成课程
+      const nextCourse = this._findNextUnfinishedCourse();
+      if (nextCourse) {
+        this.ui.log(`👉 进入下一门课程: ${nextCourse.title}`);
+        nextCourse.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await DOM.sleep(300);
+        DOM.safeClick(nextCourse.el);
+        await DOM.sleep(3000);
+        return true;
+      }
+
+      this.ui.log('🎉 所有课程已完成！');
+      return false;
+    }
+
+    /** 返回课程列表页 */
+    async _returnToCourseList() {
+      // 尝试点击左侧菜单"课程班级"
+      const menuLis = Array.from(document.querySelectorAll('.left__menu ul li'));
+      const courseMenu = menuLis.find(li => (li.textContent || '').includes('课程班级'));
+      if (courseMenu) {
+        this.ui.log('点击左侧菜单"课程班级"...');
+        DOM.safeClick(courseMenu);
+        await DOM.sleep(2500);
+        if (location.href.includes('/v2/web/index') || location.href.includes('/v2/web/') || document.querySelector('.TCardGroup')) {
+          return true;
+        }
+      }
+
+      // 直接跳转课程列表
+      this.ui.log('跳转到课程列表页...');
+      location.href = '/v2/web/index';
+      await DOM.sleep(3000);
+      return true;
+    }
+
+    /** 切换到"我听的课"页签 */
+    _ensureStudentTab() {
+      const studentTab = document.querySelector('#tab-student');
+      if (studentTab && !studentTab.classList.contains('is-active')) {
+        this.ui.log('切换到"我听的课"页签');
+        studentTab.click();
+      }
+    }
+
+    /** 在课程列表页找下一门未完成课程 */
+    _findNextUnfinishedCourse() {
+      const finished = NavigationHandler._getFinishedCourses();
+      const cards = Array.from(document.querySelectorAll('.TCardGroup .lesson-cardS .el-card__body, .TCardGroup .el-card, [class*="course-card"], [class*="lesson-card"]'))
+        .map(el => ({
+          el: el.closest('.el-card') || el,
+          title: (el.querySelector('.left .top h1, h1, [class*="title"]')?.textContent || '').trim(),
+          className: (el.querySelector('.left .bottom .className, [class*="class-name"]')?.textContent || '').trim()
+        }))
+        .filter(x => x.title);
+
+      if (!cards.length) {
+        this.ui.log('未找到课程卡片', 'warn');
+        return null;
+      }
+
+      for (const c of cards) {
+        const key = `${c.title}|${c.className}`.replace(/\s+/g, ' ');
+        if (!finished.has(key)) {
+          return c;
+        }
+      }
+      return null;
+    }
+
     async dismissModals() {
       const modalSelectors = [
         '[class*="modal"]', '[class*="dialog"]', '[class*="popup"]',
@@ -4511,6 +4901,9 @@ ${formatInst}
         this.aiAnswerer.updateSettings(settings);
         this.ui.log('🤖 AI设置已更新' + (settings.enabled && settings.apiKey ? '，已启用' : '，未启用（需要API Key）'));
       });
+      this.ui.on('crossCourseChange', (enabled) => {
+        this.ui.log(enabled ? '📚 跨课程模式已开启' : '📚 跨课程模式已关闭');
+      });
       this.ui.on('clearAnswers', () => {
         this._onClearAnswers();
       });
@@ -4625,6 +5018,9 @@ ${formatInst}
         this.noProgressCount = 0;
         this._navCooldownEnd = 0; // 找到视频，解除冷却
         this.ui.setStatus('正在播放视频...', 'info');
+        // 更新视频进度显示
+        const progressInfo = this.videoHandler.getProgressInfo();
+        this.ui.updateVideoProgress(progressInfo);
         return; // 视频播放中，等待视频结束
       }
 
@@ -4634,6 +5030,7 @@ ${formatInst}
         this.noProgressCount = 0;
         this._navCooldownEnd = 0; // 找到试题，解除冷却
         this.ui.setStatus('正在处理试题...', 'info');
+        this.ui.updateVideoProgress(null); // 隐藏视频进度
         await DOM.sleep(3000);
         return;
       }
@@ -4702,9 +5099,53 @@ ${formatInst}
       }
     }
 
-    _onCourseComplete() {
+    async _onCourseComplete() {
       if (this._courseCompleted) return; // 防止重复触发
       this._courseCompleted = true;
+
+      // 检查是否开启跨课程模式
+      if (this.ui.isCrossCourse()) {
+        this.ui.log('📚 当前课程完成，查找下一门课程...');
+        this.ui.setStatus('正在查找下一门课程...', 'info');
+        this.navHandler.markCurrentCourseFinished();
+
+        // 短暂停止视频/试题处理
+        this.videoHandler.stop();
+        this.quizHandler.stop();
+
+        const hasNext = await this.navHandler.goToNextCourse();
+        if (hasNext) {
+          // 进入新课程 → 重新启动
+          this._courseCompleted = false;
+          this.completedTasks = 0;
+          this.totalTasks = 1;
+          this.noProgressCount = 0;
+          this._navCooldownEnd = Date.now() + 15000;
+          this.lastPageUrl = location.href;
+          this._pageEnterTime = Date.now();
+          this.ui.setProgress(0, 0);
+          this.ui.updateVideoProgress(null);
+
+          // 重新扫描课程
+          setTimeout(() => {
+            const info = this.scanner.scan();
+            if (info.chapters.length > 0) {
+              this.totalTasks = info.chapters.length;
+              this.ui.log(`📖 新课程: ${info.courseName}, ${info.chapters.length} 个任务`);
+              this.ui.setProgress(0, this.totalTasks);
+            }
+            this.navHandler.start();
+            this.videoHandler.start();
+            this.quizHandler.start();
+            this.ui.setStatus('运行中...', 'info');
+          }, 3000);
+          return;
+        }
+
+        // 没有更多课程了
+        this.ui.log('🎉 所有课程已完成！');
+      }
+
       this.isRunning = false;
       this.ui.setRunning(false);
       this.videoHandler.stop();
@@ -4717,13 +5158,14 @@ ${formatInst}
       this.ui.setStatus('🎉 本课程已完成!', '');
       this.ui.log('🎉 本课程所有任务已完成，脚本已停止');
       this.ui.setProgress(this.totalTasks, this.totalTasks);
+      this.ui.updateVideoProgress(null);
 
       // 桌面通知
       if (CONFIG.notifyOnComplete) {
         try {
           GM_notification({
             title: '长江雨课堂助手',
-            text: '当前课程所有任务已完成！',
+            text: '所有课程任务已完成！',
             timeout: 5000,
           });
         } catch (e) {}
@@ -4812,5 +5254,5 @@ ${formatInst}
 
   init();
 
-  logger.info('Main', '长江雨课堂自动刷课助手 v2.10.0 已加载');
+  logger.info('Main', '长江雨课堂自动刷课助手 v3.0.0 已加载');
 })();
