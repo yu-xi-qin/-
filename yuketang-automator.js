@@ -1985,6 +1985,18 @@ ${formatInst}
         if (q.answered) continue;
         if (q.qtype === QTYPE.ESSAY) continue; // 解答题留给后面专门处理
 
+        // 刷新 DOM 引用：Vue 可能在上一题填写后重新渲染了 DOM
+        // _setTextValue 触发 input/change 事件 → Vue 模型更新 → 可能局部重绘
+        const freshItems = this.findQuestionItems(this.pageContainer);
+        const freshMap = new Map();
+        for (const item of freshItems) {
+          const s = this.getQuestionStem(item);
+          const k = DOM.normalizeText(s).substring(0, 150);
+          if (k) freshMap.set(k, item);
+        }
+        const freshEl = freshMap.get(q.stemKey);
+        if (freshEl) q.el = freshEl;
+
         const qLabel = `[${qi + 1}/${this.pageQuestions.length}]`;
         const typeLabel = { single: '单选', multi: '多选', judge: '判断', fill: '填空' }[q.qtype] || q.qtype;
         let answer = null;
