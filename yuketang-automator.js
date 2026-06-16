@@ -188,6 +188,7 @@ ${fullText}
 单选/判断：{"index": 正确答案的选项序号(0起)}
 多选：{"indices": [正确选项的序号列表]}
 填空题：{"text": "答案内容"}
+主观题（简答/论述/计算/分析/应用等）：{"text": "请根据题目类型组织答案：简答题应简明扼要列出要点；论述题应结合理论展开分析论证；计算题应给出推导步骤和最终结果；分析题应结合材料和相关理论全面阐述。答案应完整、准确、条理清晰。"}
 不确定：{"unknown": true}`;
       } else {
         prompt = this._buildSinglePrompt(questionText, options, qtype);
@@ -302,6 +303,10 @@ ${fullText}
         formatInst = `这是一道多选题，必须选出全部正确选项。\n输出格式：{"indices": [0, 1, 2]}  ← 把所有正确选项的序号都列出来！\n注意：indices数组中的每个数字代表一个正确选项(0=第一个选项A, 1=第二个选项B, 以此类推)\n多选至少包含2个选项，最多可包含全部选项。`;
       } else if (isJudge) {
         formatInst = `输出格式：{"index": 0}  ← 0=正确/对, 1=错误/错`;
+      } else if (qtype === 'fill' || qtype === QTYPE.FILL) {
+        formatInst = `输出格式：{"text": "答案内容"}  ← 填空题，直接给出答案文本`;
+      } else if (qtype === 'essay' || qtype === QTYPE.ESSAY) {
+        formatInst = `输出格式：{"text": "答案内容"}  ← 解答题，给出答案要点`;
       } else {
         formatInst = `输出格式：{"index": 0}  ← 正确答案的序号(0=第一个选项A, 1=第二个选项B, ...)`;
       }
@@ -347,7 +352,23 @@ ${formatInst}
           if (q.qtype === 'fill' || q.qtype === QTYPE.FILL) {
             prompt += `（这是填空题，请直接给出应填入的文本答案）\n`;
           } else if (q.qtype === 'essay' || q.qtype === QTYPE.ESSAY) {
-            prompt += `（这是解答题，请给出简明的答案要点）\n`;
+            // 根据题干关键词匹配合适的答题引导
+            const stemLower = (q.stem || '').toLowerCase();
+            if (/计算|求解|求值|导数|积分|方程/i.test(stemLower)) {
+              prompt += `（这是计算题，请给出完整的推导计算过程和最终结果）\n`;
+            } else if (/论述|分析|阐述|评价|讨论|理解|认识|看法|意义|影响/i.test(stemLower)) {
+              prompt += `（这是论述/分析题，请结合相关理论进行全面分析和论证，答案应条理清晰、论据充分）\n`;
+            } else if (/简答|简述|列举|列出|写出|说明|解释|回答/i.test(stemLower)) {
+              prompt += `（这是简答题，请简明扼要地列出要点，条理清晰）\n`;
+            } else if (/证明|推导|求证/i.test(stemLower)) {
+              prompt += `（这是证明题，请给出完整的推导证明过程）\n`;
+            } else if (/设计|编程|代码|实现|编写/i.test(stemLower)) {
+              prompt += `（这是设计/编程题，请给出设计方案或代码实现，并附上必要的说明）\n`;
+            } else if (/案例|材料|结合/i.test(stemLower)) {
+              prompt += `（这是材料/案例分析题，请结合材料内容进行分析，答案应基于材料展开）\n`;
+            } else {
+              prompt += `（这是主观题，请根据题目要求组织答案，内容应完整、准确、条理清晰）\n`;
+            }
           } else {
             prompt += `（选项未提取到，请根据题干判断）\n`;
           }
@@ -672,7 +693,7 @@ ${formatInst}
       // 4. 填空题/解答题：直接返回文本
       if (qtype === QTYPE.FILL || qtype === QTYPE.ESSAY || qtype === 'fill' || qtype === 'essay') {
         // 尝试提取引号中的内容或冒号后的内容
-        const textMatch = cleanContent.match(/(?:答案|填空|填|答)[：:]\s*(.+)/i) ||
+        const textMatch = cleanContent.match(/(?:答案|填空|填|答|答案要点|解题过程|结果|解答|解)[：:]\s*(.+)/i) ||
                           cleanContent.match(/"text"\s*:\s*"([^"]+)"/) ||
                           cleanContent.match(/'text'\s*:\s*'([^']+)'/);
         if (textMatch) return { text: textMatch[1].trim() };
@@ -682,7 +703,8 @@ ${formatInst}
           .replace(/\}[^}]*$/, '')  // 去掉JSON后的文字
           .replace(/```/g, '')
           .trim();
-        if (cleaned && cleaned.length >= 1 && cleaned.length < 200) {
+        const maxSubjLen = (qtype === QTYPE.ESSAY || qtype === 'essay') ? 5000 : 200;
+        if (cleaned && cleaned.length >= 1 && cleaned.length < maxSubjLen) {
           return { text: cleaned };
         }
       }
@@ -1869,6 +1891,7 @@ ${formatInst}
       const indicators = [
         'input[type="radio"]', 'input[type="checkbox"]',
         'textarea', 'input[type="text"]:not([class*="search"])',
+        '[contenteditable="true"]', '.w-e-text', '.ql-editor',
         '[class*="option"]', '[class*="choice"]', '[class*="question-item"]',
         '.que_row', '[class*="topic"]'
       ];
@@ -1970,7 +1993,7 @@ ${formatInst}
       }
 
       // ========== 逐题作答（一题一题来，确保准确） ==========
-      const unanswered = this.pageQuestions.filter(q => !q.answered && q.qtype !== QTYPE.ESSAY);
+      const unanswered = this.pageQuestions.filter(q => !q.answered);
       if (unanswered.length > 0) {
         this.ui.log(`📋 开始逐题作答: ${unanswered.length} 道 (${this.pageQuestions.length}题中)`);
       }
@@ -1983,42 +2006,42 @@ ${formatInst}
         if (!this.isHandling) return;
         const q = this.pageQuestions[qi];
         if (q.answered) continue;
-        if (q.qtype === QTYPE.ESSAY) continue; // 解答题留给后面专门处理
-
-        // 刷新 DOM 引用：Vue 可能在上一题填写后重新渲染了 DOM
-        // _setTextValue 触发 input/change 事件 → Vue 模型更新 → 可能局部重绘
-        const freshItems = this.findQuestionItems(this.pageContainer);
-        const freshMap = new Map();
-        for (const item of freshItems) {
-          const s = this.getQuestionStem(item);
-          const k = DOM.normalizeText(s).substring(0, 150);
-          if (k) freshMap.set(k, item);
-        }
-        const freshEl = freshMap.get(q.stemKey);
-        if (freshEl) q.el = freshEl;
 
         const qLabel = `[${qi + 1}/${this.pageQuestions.length}]`;
-        const typeLabel = { single: '单选', multi: '多选', judge: '判断', fill: '填空' }[q.qtype] || q.qtype;
+        const typeLabel = { single: '单选', multi: '多选', judge: '判断', fill: '填空', essay: '主观' }[q.qtype] || q.qtype;
         let answer = null;
-
-        // 1) 本地快速检测：缓存 / 全局状态 / DOM显式答案
         let answerSource = null;
-        answer = await this.tryAutoAnswer(q);
-        if (answer) {
-          answerSource = 'local';
-        } else if (this.ai && this.ai.enabled) {
-          const stem = q.stem || this.getQuestionStem(q.el);
-          // 填空题无选项，直接用全文模式，避免 _getAllOptionTexts 策略7 误提取
-          if (q.qtype === QTYPE.FILL) {
-            const fullText = (q.el.textContent || '').substring(0, 800);
-            answer = await this.ai.answer(stem, [], QTYPE.FILL, fullText);
-          } else {
-            const opts = this._getAllOptionTexts(q.el);
-            const cleanOpts = (opts.length === 1 && opts[0]?.startsWith('__FULLTEXT__:')) ? [] : opts;
-            const fullText = (cleanOpts.length < 2) ? (q.el.textContent || '').substring(0, 800) : null;
-            answer = await this.ai.answer(stem, cleanOpts, q.qtype, fullText);
+
+        // 主观题：直接尝试AI作答
+        if (q.qtype === QTYPE.ESSAY) {
+          if (this.ai && this.ai.enabled) {
+            const stem = q.stem || this.getQuestionStem(q.el);
+            const fullText = (q.el.textContent || '').substring(0, 2000);
+            answer = await this.ai.answer(stem, [], QTYPE.ESSAY, fullText);
+            if (answer) answerSource = 'ai';
           }
-          if (answer) answerSource = 'ai';
+          if (!answer) {
+            continue; // AI不可用或未能作答，留给后续统一处理
+          }
+        } else {
+          // 1) 本地快速检测：缓存 / 全局状态 / DOM显式答案
+          answer = await this.tryAutoAnswer(q);
+          if (answer) {
+            answerSource = 'local';
+          } else if (this.ai && this.ai.enabled) {
+            const stem = q.stem || this.getQuestionStem(q.el);
+            // 填空题无选项，直接用全文模式，避免 _getAllOptionTexts 策略7 误提取
+            if (q.qtype === QTYPE.FILL) {
+              const fullText = (q.el.textContent || '').substring(0, 800);
+              answer = await this.ai.answer(stem, [], QTYPE.FILL, fullText);
+            } else {
+              const opts = this._getAllOptionTexts(q.el);
+              const cleanOpts = (opts.length === 1 && opts[0]?.startsWith('__FULLTEXT__:')) ? [] : opts;
+              const fullText = (cleanOpts.length < 2) ? (q.el.textContent || '').substring(0, 800) : null;
+              answer = await this.ai.answer(stem, cleanOpts, q.qtype, fullText);
+            }
+            if (answer) answerSource = 'ai';
+          }
         }
 
         // 3) 应用答案
@@ -2090,28 +2113,31 @@ ${formatInst}
         return;
       }
 
-      // 有题目需要手动
-      // 如果只剩下解答题，尝试用AI生成答案自动填入
-      const onlyEssayRemaining = remaining.every(q => q.qtype === QTYPE.ESSAY || q.qtype === 'essay');
-      if (onlyEssayRemaining && this.ai && this.ai.enabled) {
-        this.ui.log(`📝 剩余 ${remaining.length} 道解答题，尝试AI生成答案...`);
-        for (const q of remaining) {
-          const ans = await this.ai.answer(q.stem, [], q.qtype, q.stem);
+      // 有题目需要处理
+      // 先提取出剩余的主观题，始终尝试AI作答
+      const essayRemaining = remaining.filter(q => q.qtype === QTYPE.ESSAY || q.qtype === 'essay');
+      if (essayRemaining.length > 0 && this.ai && this.ai.enabled) {
+        this.ui.log(`📝 ${essayRemaining.length} 道主观题，尝试AI生成答案...`);
+        for (const q of essayRemaining) {
+          const stem = q.stem || this.getQuestionStem(q.el);
+          const fullText = (q.el.textContent || '').substring(0, 2000);
+          const ans = await this.ai.answer(stem, [], QTYPE.ESSAY, fullText);
           if (ans && ans.text) {
-            const applied = await this.applyAnswer(q.el, ans, q.qtype);
+            const applied = await this.applyAnswer(q.el, ans, QTYPE.ESSAY);
             if (applied) {
               q.answer = ans;
               q.answered = true;
               q.answerSource = 'ai';
               Storage.addAnswer(q.stemKey, ans);
               this.quizCache = Storage.getAnswerCache();
+              this.ui.log(`✅ 主观题AI作答成功: ${q.stem.substring(0, 40)}...`);
             }
           }
         }
-        // 重新检查
+        // 重新检查剩余题目
         remaining = this.pageQuestions.filter(qq => !qq.answered);
         if (remaining.length === 0) {
-          this.ui.log('✅ AI已自动填写所有解答题');
+          this.ui.log('✅ AI已自动填写所有主观题');
           await DOM.sleep(500);
           await this.safeSubmit(container);
           return;
@@ -2213,6 +2239,23 @@ ${formatInst}
       for (const ed of richEditors) {
         if ((ed.textContent || '').trim()) return true;
       }
+      // 也检查 iframe 内的编辑器
+      try {
+        const iframes = questionEl.querySelectorAll('iframe');
+        for (const f of iframes) {
+          try {
+            const doc = f.contentDocument || f.contentWindow?.document;
+            if (doc) {
+              for (const ta of doc.querySelectorAll('textarea')) {
+                if ((ta.value || '').trim()) return true;
+              }
+              for (const ed of doc.querySelectorAll('[contenteditable="true"]')) {
+                if ((ed.textContent || '').trim()) return true;
+              }
+            }
+          } catch(e) {}
+        }
+      } catch(e) {}
       const selected = questionEl.querySelector('[class*="selected"], [class*="active"], [class*="checked"], [aria-checked="true"]');
       if (selected) return true;
       return false;
@@ -2461,22 +2504,58 @@ ${formatInst}
       const checks = questionEl.querySelectorAll('input[type="checkbox"]');
       const textInputs = questionEl.querySelectorAll('input[type="text"]:not([class*="search"]):not([placeholder*="搜索"]):not([placeholder*="search"])');
 
-      // 解答题：有富文本编辑器或大文本框——但必须同时没有选择类选项
-      // 避免将带有"editor"类名的普通元素误判为解答题
-      const essayKeywords = /简答|论述|解答|问答|简述|作文|essay/i;
-      const hasEssayKeyword = essayKeywords.test(fullText.substring(0, 120));
-      if (radios.length === 0 && checks.length === 0 && textInputs.length === 0) {
-        const richEditors = questionEl.querySelectorAll('[contenteditable="true"]');
-        if (richEditors.length > 0 && hasEssayKeyword) {
-          return QTYPE.ESSAY;
-        }
-        // [class*="editor"] 太宽泛，只在明确有essay关键词时才判定
-        const editorEls = questionEl.querySelectorAll('[class*="richtext"], [class*="rich-text"]');
-        if (editorEls.length > 0 && hasEssayKeyword) {
-          return QTYPE.ESSAY;
+      // 解答题检测
+      // 先检查题型标签（通常在最前面，如 .item-type、[class*="type"] 等）
+      const typeLabelEl = questionEl.querySelector('.item-type, [class*="type-tag"], [class*="qtype"], [class*="question-type"]');
+      const typeLabelText = (typeLabelEl?.textContent || '').substring(0, 20);
+      const isExplicitEssay = /简答|论述|解答|问答|主观|作文|essay|问答|简述|计算|分析|应用|综合|材料|设计|编程|证明|推导|绘图|案例|评价|说明|阐述|解释|回答|作答/i.test(typeLabelText);
+      const isExplicitFill = /填空|填充|补全|填写|完形|fill/i.test(typeLabelText);
+
+      // 找到所有富文本编辑器（包括 iframe 内的）
+      const contentEditables = questionEl.querySelectorAll('[contenteditable="true"], [contenteditable=""], .w-e-text, .ql-editor, [class*="w-e-text"], iframe');
+      const hasRichEditor = contentEditables.length > 0;
+      // 检查 iframe 内是否有 contentEditable
+      let hasIframeEditor = false;
+      if (contentEditables.length > 0) {
+        for (const el of contentEditables) {
+          if (el.tagName === 'IFRAME') {
+            try {
+              const doc = el.contentDocument || el.contentWindow?.document;
+              if (doc && doc.querySelector('[contenteditable="true"], textarea')) { hasIframeEditor = true; break; }
+            } catch(e) {}
+          }
         }
       }
 
+      const essayKeywords = /简答|论述|解答|问答|简述|作文|计算|分析|应用|综合|材料|设计|编程|证明|推导|绘图|案例|评价|说明|阐述|解释|主观|回答|作答|essay/i;
+      const hasEssayKeyword = essayKeywords.test(fullText.substring(0, 120)) || essayKeywords.test(typeLabelText);
+
+      // 优先检测：题型标签明确标注为解答题
+      if (isExplicitEssay && radios.length === 0 && checks.length === 0) {
+        return QTYPE.ESSAY;
+      }
+
+      // 富文本编辑器 + 无选项 → 解答题（即使没有 essay 关键词也更可能是主观题）
+      if (radios.length === 0 && checks.length === 0 && textInputs.length === 0) {
+        if (hasRichEditor || hasIframeEditor) {
+          if (hasEssayKeyword) return QTYPE.ESSAY;
+          // 没有 essay 关键词但有大量文本内容的编辑器 → 仍然判定为解答题
+          for (const el of contentEditables) {
+            if (el.tagName !== 'IFRAME') {
+              const childText = (el.textContent || '').trim();
+              if (el.classList.contains('ql-editor') || el.classList.contains('w-e-text') || /editor|text|answer/i.test(el.className)) {
+                return QTYPE.ESSAY;
+              }
+            }
+          }
+          return QTYPE.ESSAY;  // 保守判定：有 contentEditable 且无选项，大概率是主观题
+        }
+        // 检查常见的富文本编辑器类名
+        const editorClasses = questionEl.querySelectorAll('[class*="richtext"], [class*="rich-text"], [class*="w-e-text"], [class*="edui"], [class*="cke_"], [class*="trumbowyg"], [class*="sun-editor"]');
+        if (editorClasses.length > 0) return QTYPE.ESSAY;
+      }
+
+      // 有 textarea 的情况
       if (textareas.length > 0) {
         // 如果同时有选项和文本框 → 以选项为准，不是解答题
         if (radios.length > 0 || checks.length > 0) {
@@ -2487,8 +2566,8 @@ ${formatInst}
         const isEssay = Array.from(textareas).some(ta => {
           const rows = parseInt(ta.getAttribute('rows') || '1');
           const h = ta.offsetHeight || ta.clientHeight || 0;
-          // 严格条件：rows>=5 且 高度>100px 且 有essay关键词
-          return (rows >= 5 && h > 100) || (rows >= 4 && hasEssayKeyword);
+          // 放宽条件：rows>=4 或 高度>80px 或 有essay关键词 或 题型标签标注解答
+          return (rows >= 4) || (h > 80) || hasEssayKeyword || isExplicitEssay;
         });
         if (isEssay) return QTYPE.ESSAY;
         return QTYPE.FILL;
@@ -2500,6 +2579,9 @@ ${formatInst}
         const typeLabel = (questionEl.querySelector('.item-type')?.textContent || '').substring(0, 30);
         if (/判断|选择|单选|多选/i.test(typeLabel)) {
           return QTYPE.UNKNOWN;
+        }
+        if (/简答|论述|解答|问答|简述|计算|分析|应用|综合|材料|设计|编程|证明|推导|绘图|案例|评价|说明|阐述|解释|主观|回答|作答|作文|essay/i.test(typeLabel)) {
+          return QTYPE.ESSAY;
         }
         return QTYPE.FILL;
       }
@@ -2545,7 +2627,7 @@ ${formatInst}
       if (/多选|不定项|多项|multiple/i.test(fullText.substring(0, 100))) return QTYPE.MULTI;
       if (/判断|对错|是非/i.test(fullText.substring(0, 100))) return QTYPE.JUDGE;
       if (/填空|填充|补全|填写/i.test(fullText.substring(0, 100))) return QTYPE.FILL;
-      if (/简答|论述|解答|问答|简述/i.test(fullText.substring(0, 100))) return QTYPE.ESSAY;
+      if (/简答|论述|解答|问答|简述|计算|分析|应用|综合|材料|设计|编程|证明|推导|绘图|案例|评价|说明|阐述|解释|主观|回答|作答/i.test(fullText.substring(0, 100))) return QTYPE.ESSAY;
       if (/单选|选择/i.test(fullText.substring(0, 100))) return QTYPE.SINGLE;
 
       return QTYPE.UNKNOWN;
@@ -2899,10 +2981,23 @@ ${formatInst}
       // 解答题
       if (q.qtype === QTYPE.ESSAY) {
         const textareas = q.el.querySelectorAll('textarea');
-        const richEditors = q.el.querySelectorAll('[contenteditable="true"]');
+        const richEditors = q.el.querySelectorAll('[contenteditable="true"], .w-e-text, .ql-editor');
         let content = '';
         for (const ta of textareas) content += (ta.value || '') + ' ';
         for (const ed of richEditors) content += (ed.textContent || '') + ' ';
+        // 也检查 iframe 内的内容
+        try {
+          const iframes = q.el.querySelectorAll('iframe');
+          for (const f of iframes) {
+            try {
+              const doc = f.contentDocument || f.contentWindow?.document;
+              if (doc) {
+                for (const ta of doc.querySelectorAll('textarea')) content += (ta.value || '') + ' ';
+                for (const ed of doc.querySelectorAll('[contenteditable="true"], .w-e-text, .ql-editor')) content += (ed.textContent || '') + ' ';
+              }
+            } catch(e) {}
+          }
+        } catch(e) {}
         content = content.trim();
         if (content.length > 0) return { text: content, isEssay: true };
         return null;
@@ -3155,11 +3250,7 @@ ${formatInst}
 
         // 解答题
         if (qtype === QTYPE.ESSAY || answer.isEssay) {
-          const textareas = questionEl.querySelectorAll('textarea');
-          const richEditors = questionEl.querySelectorAll('[contenteditable="true"]');
-          for (const ta of textareas) { this._setTextValue(ta, searchText); }
-          for (const ed of richEditors) { ed.textContent = searchText; ed.dispatchEvent(new Event('input', { bubbles: true })); }
-          return textareas.length > 0 || richEditors.length > 0;
+          return await this._applyEssayAnswer(questionEl, searchText);
         }
 
         // 选择题：匹配文本
@@ -3208,6 +3299,331 @@ ${formatInst}
           return true;
         }
       }
+      return false;
+    }
+
+    /** 查找解答题/填空题的编辑器元素，支持多种编辑器类型 */
+    _findEssayEditors(scope, depth = 0) {
+      const results = [];
+      const seen = new Set();
+      const add = (el) => {
+        if (el && !seen.has(el)) { seen.add(el); results.push(el); }
+      };
+
+      if (!scope || depth > 3) return results;
+
+      // 1. 标准 textarea
+      scope.querySelectorAll('textarea').forEach(add);
+      // 2. contenteditable 元素（含所有可编辑变体）
+      scope.querySelectorAll('[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], [contenteditable="markdown"]').forEach(add);
+      // 3. Quill 编辑器
+      scope.querySelectorAll('.ql-editor, .ql-container [contenteditable]').forEach(add);
+      // 4. 富文本编辑器常见类名 — 只添加可写的子元素
+      const richSelectors = [
+        '.w-e-text', '.w-e-textarea',   // wangEditor 可写区域
+        '[class*="edui"] textarea',      // UEditor
+        '[class*="cke_"] textarea',      // CKEditor
+        '[class*="fr-box"] [contenteditable]', // Froala
+        '[class*="tox-"] .tox-edit-area', // TinyMCE
+        '[class*="sun-editor"] [contenteditable]',
+      ];
+      for (const sel of richSelectors) {
+        scope.querySelectorAll(sel).forEach(add);
+      }
+      // 4b: 通过类名中的 richtext/trumbowyg 找到可写元素
+      scope.querySelectorAll('[class*="richtext"], [class*="rich-text"], [class*="trumbowyg"]').forEach(el => {
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.contentEditable === 'true' || el.contentEditable === '') {
+          add(el);
+        }
+        el.querySelectorAll('textarea, [contenteditable="true"]').forEach(add);
+      });
+      // 4c: 雨课堂/国内平台常见编辑器类名 — 找可写子元素
+      const cnEditorSelectors = [
+        '[class*="answer-edit"]', '[class*="text-edit"]',
+        '[class*="edit-area"]', '[class*="input-area"]',
+        '[class*="fill-answer"]', '[class*="write-answer"]',
+        '[class*="short-answer"]', '[class*="long-answer"]',
+        '[class*="essay-answer"]', '[class*="subjective"]',
+        '[class*="answer-content"]',
+      ];
+      for (const sel of cnEditorSelectors) {
+        for (const el of scope.querySelectorAll(sel)) {
+          el.querySelectorAll('textarea, input, [contenteditable="true"]').forEach(add);
+          if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.contentEditable === 'true' || el.contentEditable === '') {
+            add(el);
+          }
+        }
+      }
+      // 4d: Element UI 输入组件 (雨课堂常用)
+      scope.querySelectorAll('.el-textarea__inner, .el-input__inner, [class*="el-input"], textarea.el-input__inner').forEach(el => {
+        if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') add(el);
+      });
+
+      // 5. 按 ID 包含 editor/text/answer — 只添加可写元素
+      scope.querySelectorAll('[id*="editor"], [id*="Editor"], [id*="text"], [id*="Text"], [id*="answer"], [id*="Answer"]').forEach(el => {
+        const tag = el.tagName.toLowerCase();
+        if (tag === 'textarea' || tag === 'input' || el.getAttribute('contenteditable') === 'true' || el.getAttribute('contenteditable') === '') {
+          add(el);
+        }
+      });
+      // 6. 所有 div[role="textbox"] 或具有 aria-multiline 的元素
+      scope.querySelectorAll('[role="textbox"], [aria-multiline="true"], [class*="input"][contenteditable]').forEach(add);
+      // 7. 在 iframe 内查找
+      try {
+        scope.querySelectorAll('iframe').forEach(iframe => {
+          try {
+            const doc = iframe.contentDocument || iframe.contentWindow?.document;
+            if (doc && doc.body) {
+              // 递归查找 iframe 文档
+              this._findEssayEditors(doc, depth + 1).forEach(add);
+            }
+          } catch (e2) {
+            // cross-origin iframe — 尝试从主 window 的 frame 引用访问
+            try {
+              const idx = Array.from(scope.ownerDocument?.querySelectorAll('iframe') || []).indexOf(iframe);
+              if (idx >= 0 && window.frames?.[idx]) {
+                const fDoc = window.frames[idx].document;
+                if (fDoc && fDoc.body) {
+                  this._findEssayEditors(fDoc, depth + 1).forEach(add);
+                }
+              }
+            } catch (e3) { /* still cross-origin */ }
+          }
+        });
+      } catch (e) {}
+
+      return results;
+    }
+
+    /** 解答题答案写入：多策略尝试写入富文本编辑器 */
+    async _applyEssayAnswer(questionEl, searchText) {
+      if (!searchText) return false;
+
+      // 收集所有可写元素的诊断信息
+      const diag = {
+        tagNames: {}, selectors: {}, iframes: 0, visible: 0
+      };
+
+      // 查找编辑器：多次尝试，每轮扩大范围
+      const findEditors = (scope) => this._findEssayEditors(scope);
+      let editors = [];
+
+      // 尝试3轮，每轮逐渐扩大搜索范围，间隔短暂等待给DOM渲染时间
+      for (let round = 0; round < 3; round++) {
+        if (round === 0) {
+          editors = findEditors(questionEl);
+        } else if (round === 1 && editors.length === 0 && this.pageContainer) {
+          editors = findEditors(this.pageContainer);
+        } else if (round === 2 && editors.length === 0) {
+          editors = findEditors(document);
+          // 也尝试在所有同域 iframe 中查找
+          if (editors.length === 0) {
+            try {
+              for (let i = 0; i < Math.min(window.frames.length, 10); i++) {
+                try {
+                  const fDoc = window.frames[i].document;
+                  if (fDoc) editors = findEditors(fDoc);
+                  if (editors.length > 0) break;
+                } catch (e) { /* cross-origin */ }
+              }
+            } catch (e) {}
+          }
+        }
+        if (editors.length > 0) break;
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      // 详细诊断输出
+      if (editors.length === 0) {
+        // 输出 questionEl 的完整结构诊断
+        const qClass = (questionEl.className?.toString?.() || questionEl.getAttribute?.('class') || '').substring(0, 100);
+        logger.warn('Quiz', `❌ 未找到编辑器! questionEl类名="${qClass}"`);
+        logger.warn('Quiz', `questionEl标签=${questionEl.tagName} id=${questionEl.id || '无'}`);
+        logger.warn('Quiz', `questionEl内含: textarea=${questionEl.querySelectorAll('textarea').length} contentEditable=${questionEl.querySelectorAll('[contenteditable]').length} input=${questionEl.querySelectorAll('input').length} iframe=${questionEl.querySelectorAll('iframe').length}`);
+        // 检查整个页面有什么可写元素
+        const pageTextareas = document.querySelectorAll('textarea').length;
+        const pageEditable = document.querySelectorAll('[contenteditable="true"]').length;
+        const pageIframes = document.querySelectorAll('iframe').length;
+        logger.warn('Quiz', `全页面统计: textarea=${pageTextareas} contentEditable=${pageEditable} iframe=${pageIframes}`);
+        // 列出前5个可见文本输入框
+        let visIdx = 0;
+        for (const el of document.querySelectorAll('textarea, [contenteditable="true"]')) {
+          if (visIdx >= 5) break;
+          if (el.offsetParent !== null || el.offsetHeight > 0) {
+            const tag = el.tagName.toLowerCase();
+            const cls = (el.className || '').substring(0, 60);
+            const parentCls = (el.parentElement?.className || '').substring(0, 40);
+            logger.warn('Quiz', `可见输入框#${visIdx + 1}: <${tag}> class="${cls}" 父类名="${parentCls}"`);
+            visIdx++;
+          }
+        }
+      } else {
+        logger.info('Quiz', `✅ 找到 ${editors.length} 个编辑器:`,
+          Array.from(editors).slice(0, 5).map(e =>
+            `<${e.tagName.toLowerCase()}> class="${(e.className||'').substring(0,40)}" visible=${e.offsetParent !== null} editable=${e.contentEditable}`
+          ).join(' | ')
+        );
+      }
+
+      // 写入所有找到的编辑器
+      for (const editor of editors) {
+        const wrote = await this._writeToEditor(editor, searchText);
+        if (wrote) {
+          // 验证内容是否真的写入了
+          const verifyText = (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') ? editor.value : editor.textContent;
+          if (verifyText?.trim()?.length > 0) {
+            logger.info('Quiz', `编辑器写入验证成功 (${editor.tagName}), 内容长度=${verifyText.length}`);
+            return true;
+          }
+        }
+      }
+
+      // 兜底轮询（某些编辑器需要时间初始化）
+      for (let retry = 0; retry < 5; retry++) {
+        await new Promise(r => setTimeout(r, 500));
+        editors = findEditors(document);
+        if (editors.length > 0) {
+          for (const editor of editors) {
+            if (await this._writeToEditor(editor, searchText)) {
+              const verifyText = (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') ? editor.value : editor.textContent;
+              if (verifyText?.trim()?.length > 0) {
+                logger.info('Quiz', `轮询${retry + 1}: 编辑器写入成功`);
+                return true;
+              }
+            }
+          }
+        }
+      }
+
+      // 兜底: 查找任何可见的可写元素（即使 _findEssayEditors 漏掉了）
+      const fallbacks = questionEl.querySelectorAll('[class*="text"], [class*="Text"], [class*="content"], [class*="answer"], [class*="edit"], [class*="input"], [class*="textarea"], .el-textarea__inner');
+      for (const fb of fallbacks) {
+        if (fb.tagName === 'TEXTAREA' || fb.tagName === 'INPUT' || fb.getAttribute('contenteditable') === 'true') {
+          if (await this._writeToEditor(fb, searchText)) return true;
+        }
+      }
+
+      // 终极兜底：尝试用 execCommand 插入任何可见的文本输入
+      try {
+        const activeEl = document.activeElement;
+        const allEditable = document.querySelectorAll('textarea, [contenteditable="true"], input[type="text"], [role="textbox"]');
+        for (const el of allEditable) {
+          if (el.offsetParent !== null || el.offsetHeight > 0) {
+            el.focus({ preventScroll: true });
+            try { el.select?.(); } catch(e) {}
+            const edDoc = el.ownerDocument || document;
+            const edWin = edDoc.defaultView || window;
+            edDoc.execCommand('selectAll', false, null);
+            edDoc.execCommand('insertText', false, searchText);
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            if (activeEl && activeEl !== el) activeEl.focus({ preventScroll: true });
+            logger.info('Quiz', 'execCommand终极写入成功');
+            return true;
+          }
+        }
+      } catch (e) {
+        logger.warn('Quiz', 'execCommand终极写入失败:', e.message);
+      }
+
+      logger.warn('Quiz', '所有方案均无法写入编辑器, searchText前80=' + searchText.substring(0, 80));
+      return false;
+    }
+
+    /** 向单个编辑器元素写入答案，尝试多种技术 */
+    async _writeToEditor(editor, text) {
+      if (!editor) return false;
+      const tag = editor.tagName.toLowerCase();
+      const isContentEditable = editor.getAttribute('contenteditable') === 'true' || editor.getAttribute('contenteditable') === '';
+      const isInput = tag === 'textarea' || tag === 'input';
+
+      try {
+        if (isInput) {
+          // 策略1: 原生 setter + 事件
+          this._setTextValue(editor, text);
+          editor.dispatchEvent(new Event('keydown', { bubbles: true }));
+          editor.dispatchEvent(new Event('keyup', { bubbles: true }));
+          // 触发 Vue v-model
+          editor.dispatchEvent(new Event('input', { bubbles: true }));
+          editor.dispatchEvent(new Event('change', { bubbles: true }));
+          // 尝试触发 element-plus / Element UI 响应
+          const vueEl = editor.__vue__ || editor.closest?.('[class*="el-"]')?.__vue__;
+          if (vueEl) {
+            try { vueEl.$emit?.('input', text); } catch(e) {}
+          }
+          return true;
+        }
+
+        if (isContentEditable) {
+          // 策略2: 直接设置 innerHTML（富文本编辑器需要 HTML）
+          // 注意：有些编辑器用 textContent 不触发内部更新，需要用 innerHTML
+          editor.focus({ preventScroll: true });
+
+          // 2a: 用 execCommand 清除并插入（使用编辑器所属文档，支持iframe内编辑器）
+          try {
+            const editorDoc = editor.ownerDocument || document;
+            const editorWin = editorDoc.defaultView || window;
+            const sel = editorWin.getSelection();
+            const range = editorDoc.createRange();
+            range.selectNodeContents(editor);
+            sel.removeAllRanges();
+            sel.addRange(range);
+            editorDoc.execCommand('delete', false, null);
+            const htmlText = text.replace(/\n/g, '<br>');
+            editorDoc.execCommand('insertHTML', false, htmlText);
+            logger.info('Quiz', 'execCommand写入成功 (contentEditable)');
+          } catch (e2) {
+            // 2b: 直接用 innerHTML
+            editor.innerHTML = text.replace(/\n/g, '<br>');
+          }
+
+          // 2c: 也设置 textContent 作为备份
+          if (!editor.textContent?.trim()) {
+            editor.textContent = text;
+          }
+
+          // 事件风暴：触发所有可能的事件类型
+          const events = ['input', 'change', 'keydown', 'keyup', 'keypress', 'blur'];
+          for (const evt of events) {
+            editor.dispatchEvent(new Event(evt, { bubbles: true, cancelable: true }));
+          }
+          // 额外延迟再触发一次 input（有些框架需要）
+          setTimeout(() => {
+            editor.dispatchEvent(new Event('input', { bubbles: true }));
+          }, 50);
+
+          // 2d: 尝试触发 Vue 响应式（Element UI / element-plus）
+          const vueWrapper = editor.closest('[class*="editor"], [class*="edit"], .ql-container, [class*="rich"], [class*="text"], .el-textarea, .w-e-text-container, [class*="w-e"]');
+          if (vueWrapper) {
+            vueWrapper.dispatchEvent(new Event('input', { bubbles: true }));
+            try {
+              const vueEl = vueWrapper.__vue__ || editor.__vue__;
+              if (vueEl?.$emit) {
+                vueEl.$emit('input', text);
+                vueEl.$emit('change', text);
+              }
+              // 尝试找到 el-form 的 model 并直接更新
+              const form = vueWrapper.closest('[class*="el-form"], .el-form');
+              if (form?.__vue__?.$model) {
+                // 尝试遍历更新
+              }
+            } catch(e) {}
+          }
+
+          // 2e: 尝试触发 React 的 onChange 模拟
+          try {
+            const nativeInputValue = Object.getOwnPropertyDescriptor(window.HTMLDivElement.prototype, 'textContent')?.set;
+            if (nativeInputValue) {
+              nativeInputValue.call(editor, text);
+            }
+          } catch(e) {}
+
+          return true;
+        }
+      } catch (e) {
+        logger.warn('Quiz', '_writeToEditor 失败:', e.message);
+      }
+
       return false;
     }
 
@@ -3288,13 +3704,21 @@ ${formatInst}
       for (let i = 0; i < questions.length; i++) {
         const q = questions[i];
         q.el.classList.add('ykh-need-manual');
-        // 添加序号标记
+        // 添加序号标记 — 不要追加到编辑器内部，而是追加到题干区域或题目容器开头
         const badge = document.createElement('div');
         badge.className = 'ykh-unanswered-badge';
         badge.textContent = String(i + 1);
         badge.setAttribute('data-ykh-badge', '1');
         q.el.style.position = q.el.style.position || 'relative';
-        q.el.appendChild(badge);
+        // 找到题干的合适位置追加，避免 badge 出现在编辑器/答题框内
+        const stemArea = q.el.querySelector('[class*="stem"], [class*="title"], [class*="topic"], h4, .item-body, .que_tit');
+        if (stemArea && stemArea !== q.el) {
+          stemArea.style.position = stemArea.style.position || 'relative';
+          stemArea.appendChild(badge);
+        } else {
+          // 没有题干区 → 插入到容器最前面（而不是末尾，避免在编辑器内）
+          q.el.insertBefore(badge, q.el.firstChild);
+        }
       }
       // 浮动计数器
       this._floatCounter = document.createElement('div');
@@ -3354,6 +3778,11 @@ ${formatInst}
         '[class*="question-wrap"]', '[class*="questionWrap"]',
         '[data-type*="question"]', '[data-qid]',
         '[class*="que_"]', '[id*="que_"]',
+        // 雨课堂/国内平台常见题目包裹
+        '[class*="subject-info"]',
+        '[class*="paper-item"]',
+        '[class*="exam-question"]', '[class*="test-question"]',
+        '[class*="que-item"]', '[class*="item-question"]',
       ];
       for (const sel of selectors) {
         const items = container.querySelectorAll(sel);
@@ -3438,6 +3867,18 @@ ${formatInst}
       const textInputs = container.querySelectorAll('input[type="text"]:not([class*="search"]):not([placeholder*="搜索"]):not([placeholder*="search"])');
       for (const inp of textInputs) {
         const wrapper = inp.closest('[class*="question"], [class*="topic"], [class*="item"], [class*="wrap"], [class*="block"], [class*="row"], div');
+        if (wrapper && !items.includes(wrapper)) {
+          const isSubset = items.some(item => item.contains(wrapper) || wrapper.contains(item));
+          if (!isSubset) {
+            items.push(wrapper);
+          }
+        }
+      }
+
+      // 策略F：找 contenteditable 富文本编辑器（解答题常用 wangEditor/Quill）
+      const editableEditors = container.querySelectorAll('[contenteditable="true"], .w-e-text, .ql-editor, [class*="w-e-text"]');
+      for (const ed of editableEditors) {
+        const wrapper = ed.closest('[class*="question"], [class*="topic"], [class*="item"], [class*="wrap"], [class*="block"], [class*="row"], div');
         if (wrapper && !items.includes(wrapper)) {
           const isSubset = items.some(item => item.contains(wrapper) || wrapper.contains(item));
           if (!isSubset) {
