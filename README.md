@@ -1,4 +1,4 @@
-# 长江雨课堂自动刷课助手 v2.10.0
+# 长江雨课堂自动刷课助手 v3.4.1
 
 自动刷视频、AI 智能答题的浏览器脚本工具，适用于 [长江雨课堂](https://changjiang.yuketang.cn/) 平台。
 
@@ -23,8 +23,9 @@
 
 1. 安装浏览器扩展 **Tampermonkey**
 2. 打开管理面板 → **"添加新脚本"**
-3. 粘贴 `yuketang-automator.js` 完整内容，保存
-4. 访问 https://changjiang.yuketang.cn/
+3. 粘贴 `yuketang-helper-v3.4.1.user.js` 完整内容，保存
+4. 保证油猴可以在此网页运行
+5. 访问 https://changjiang.yuketang.cn/
 
 ## AI 答题配置
 
@@ -33,11 +34,12 @@ AI 答题是可选功能，需要配置 API 才能使用。推荐使用 **DeepSe
 ### 快速配置
 
 1. 打开 [DeepSeek 开放平台](https://platform.deepseek.com/)，注册并获取 API Key
-2. 在脚本面板中找到 **"🤖 AI 答题设置"**，展开
-3. 勾选 **"启用AI"**
-4. 填入 API Key（格式：`sk-xxxxxxxx`）
-5. API 地址默认：`https://api.deepseek.com/v1/chat/completions`
-6. 模型默认：`deepseek-chat`（推荐，10元/百万token）
+2. 或者注册阿里云百炼领取权益卷300，填写对应key和URL地址
+3. 在脚本面板中找到 **"🤖 AI 答题设置"**，展开
+4. 勾选 **"启用AI"**
+5. 填入 API Key（格式：`sk-xxxxxxxx`）
+6. API 地址默认：`https://api.deepseek.com/v1/chat/completions`
+7. 模型默认：`deepseek-chat`（推荐，10元/百万token）
 
 ### 支持的 API
 
@@ -61,6 +63,7 @@ AI 答题是可选功能，需要配置 API 才能使用。推荐使用 **DeepSe
 6. 视频自动播放，遇到试题自动处理
 7. 能自动确定的直接作答，不能的由 **AI 推理**
 8. AI 也无法确定的 → 橙色高亮，手动选择后点 **"✅ 继续运行"**
+9. 新添加获取题目功能
 
 ### 答题策略
 
