@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         长江雨课堂自动刷课助手
 // @namespace    https://changjiang.yuketang.cn/
-// @version      3.4.1
+// @version      3.4.2
 // @description  自动刷视频、做试题，支持倍速播放与AI智能答题（手动提交，未完成题目列表）
 // @author       yuketang-helper
 // @match        https://changjiang.yuketang.cn/*
@@ -401,7 +401,7 @@ ${fullText}
 
       let formatInst = '';
       if (isMulti) {
-        formatInst = `这是一道多选题，必须选出全部正确选项。\n输出格式：{"indices": [0, 1, 2]}  ← 把所有正确选项的序号都列出来！\n注意：indices数组中的每个数字代表一个正确选项(0=第一个选项A, 1=第二个选项B, 以此类推)\n多选至少包含2个选项，最多可包含全部选项。`;
+        formatInst = `这是一道多选题，必须选出全部正确选项（通常至少2个）。\n输出格式：{"answer": "AC"}  ← 把正确选项的字母连写；例如只有第1个和第3个选项正确就写 "AC"。\n注意：示例只是格式示意，必须按本题实际内容作答，绝对不要照抄示例字母；只有题目确实所有选项都正确时才选全部选项；不确定时输出 {"unknown": true}。`;
       } else if (isJudge) {
         formatInst = `输出格式：{"index": 0}  ← index 是正确选项在选项列表中的序号（0=第一个选项，1=第二个选项）；若没有给出选项，0=正确/对，1=错误/错`;
       } else if (qtype === 'fill' || qtype === QTYPE.FILL) {
@@ -728,21 +728,54 @@ ${formatInst}
         cleanContent = codeBlockMatch[1].trim();
       }
 
-      // 1. JSON 对象
-      const jsonMatch = cleanContent.match(/\{[\s\S]*?\}/);
-      if (jsonMatch) {
+      // 1. JSON 对象（模型有时会先复述格式示例再给答案：从后往前取第一个能解析出答案的）
+      const jsonCandidates = [...cleanContent.matchAll(/\{[\s\S]*?\}/g)].map(m => m[0]).reverse();
+      for (const candidate of jsonCandidates) {
         try {
-          const p = JSON.parse(jsonMatch[0]);
+          const p = JSON.parse(candidate);
           if (p.unknown) return null;
           const isFillQ = qtype === 'fill' || qtype === QTYPE.FILL;
           const isMultiQ = qtype === 'multi' || qtype === QTYPE.MULTI;
-          // 多选连续字母: {"answer": "AB"}
-          if (isMultiQ && typeof p.answer === 'string' && /^[A-Ha-h]{2,}$/.test(p.answer.trim())) {
-            const v = [...new Set(p.answer.trim().toUpperCase().split('').map(l => l.charCodeAt(0) - 65))]
-              .filter(i => i >= 0 && i < maxIdx);
-            if (v.length > 0) return { indices: v };
+          // 多选题：只按明确字段解析，支持 "AC" / "A,C" / ["A","C"] / [0,2] / 单个 index。
+          // 绝不扫描整段回复里的字母，否则分析文字中出现的 A/B/C/D 会被当成"全选"
+          if (isMultiQ) {
+            const toIndices = (val) => {
+              const out = [];
+              if (typeof val === 'number') out.push(val);
+              else if (typeof val === 'string') {
+                const full = val.trim().toUpperCase();
+                if (/^\d+$/.test(full)) out.push(parseInt(full, 10));
+                else if (/^\d+(\s*[,，、;；\/／]\s*\d+)+$/.test(full)) {
+                  full.split(/[^\d]+/).forEach(n => { if (n) out.push(parseInt(n, 10)); });
+                } else {
+                  const compact = full.replace(/[\s,，、;；/／和及与+]/g, '');
+                  let letters = '';
+                  if (/^[A-H]+$/.test(compact)) letters = compact;
+                  else {
+                    const m = full.match(/(?:答案|正确选项|应选|选)[^\nA-H]{0,6}([A-H](?:\s*[,，、;；/／和及与]?\s*[A-H])*)/);
+                    if (m) letters = m[1].replace(/[^A-H]/g, '');
+                  }
+                  for (const ch of letters) out.push(ch.charCodeAt(0) - 65);
+                }
+              } else if (Array.isArray(val)) {
+                for (const v of val) {
+                  if (typeof v === 'number') out.push(v);
+                  else if (typeof v === 'string') {
+                    const t = v.trim().toUpperCase();
+                    if (/^\d+$/.test(t)) out.push(parseInt(t, 10));
+                    else if (/^[A-H]$/.test(t)) out.push(t.charCodeAt(0) - 65);
+                  }
+                }
+              }
+              return [...new Set(out)].filter(i => Number.isInteger(i) && i >= 0 && i < maxIdx).sort((a, b) => a - b);
+            };
+            for (const key of ['indices', 'answer', 'letters', 'selected', 'index', 'text']) {
+              if (p[key] === undefined) continue;
+              const v = toIndices(p[key]);
+              if (v.length > 0) return { indices: v };
+            }
           }
-          if (p.indices && Array.isArray(p.indices)) {
+          if (!isMultiQ && p.indices && Array.isArray(p.indices)) {
             const v = p.indices.map(i => typeof i === 'string' ? parseInt(i, 10) : i)
               .filter(i => typeof i === 'number' && i >= 0 && i < maxIdx);
             if (v.length > 0) return { indices: v };
@@ -817,27 +850,16 @@ ${formatInst}
         }
       }
 
-      // 3. 多选字母
+      // 3. 多选字母（只解析明确标注为答案的字母；绝不扫描全文，否则解释里的 A/B/C/D 会变成全选）
       if (qtype === 'multi' || qtype === QTYPE.MULTI) {
-        // 先尝试 "ABC" 连续字母模式
-        const multiLetterMatch = cleanContent.match(/(?:答案|正确|选)[^\n]*?([A-Ha-h]{2,})/i);
-        if (multiLetterMatch) {
-          const indices = [...new Set(multiLetterMatch[1].toUpperCase().split('').map(l => l.charCodeAt(0) - 65).filter(i => i >= 0 && i < maxIdx))];
-          if (indices.length > 0) return { indices };
+        const m = cleanContent.match(/(?:答案|正确选项|应选|选(?:择|项)?)\s*(?:是|为|[:：])?\s*([A-Ha-h](?:\s*[,，、;；\/／和及与]?\s*[A-Ha-h]){1,})/i)
+          || cleanContent.match(/^\s*([A-Ha-h](?:\s*[,，、;；\/／和及与]?\s*[A-Ha-h]){1,})\s*$/m);
+        if (m) {
+          const indices = [...new Set(m[1].toUpperCase().match(/[A-H]/g).map(l => l.charCodeAt(0) - 65))]
+            .filter(i => i >= 0 && i < maxIdx).sort((a, b) => a - b);
+          if (indices.length >= 2) return { indices };
         }
-        // 逗号分隔的字母
-        const commaSepMatch = cleanContent.match(/([A-Ha-h](?:\s*[,，、]\s*[A-Ha-h])+)/i);
-        if (commaSepMatch) {
-          const letters = commaSepMatch[1].match(/[A-Ha-h]/gi) || [];
-          const indices = [...new Set(letters.map(l => l.toUpperCase().charCodeAt(0) - 65).filter(i => i >= 0 && i < maxIdx))];
-          if (indices.length > 0) return { indices };
-        }
-        // 回退到单字母匹配
-        const letters = cleanContent.match(/[A-H]/gi);
-        if (letters && letters.length >= 1) {
-          const indices = [...new Set(letters.map(l => l.toUpperCase().charCodeAt(0) - 65).filter(i => i >= 0 && i < maxIdx))];
-          if (indices.length > 0) return { indices };
-        }
+        return null;
       }
 
       // 4. 填空题/解答题：直接返回文本
@@ -2495,6 +2517,9 @@ ${formatInst}
             let retryOk = false;
             for (const idx of answer.indices) {
               if (idx < opts.length) {
+                // 已选中的选项绝不能重点：checkbox 再点一次会把选中取消
+                const curEls = this._getOptionElements(q.el);
+                if (curEls[idx] && this._isOptionSelected(curEls[idx])) continue;
                 this._clickByText(q.el, opts[idx]);
                 await DOM.sleep(300);
               }
@@ -2745,8 +2770,10 @@ ${formatInst}
           }
           // 独立 radio/checkbox（没有 group 组件）：清组件自身的 v-model 数据，
           // 只删 is-checked 样式的话 Vue 数据还在，答题卡仍显示已作答、重跑会跳过该题
-          try { vm.$emit('input', isCb ? false : undefined); } catch (e) { /* ignore */ }
-          try { vm.$emit('change', isCb ? false : undefined); } catch (e) { /* ignore */ }
+          // checkbox 绑定的可能是数组 v-model，发 false 会污染数据，必须按绑定类型发空数组
+          const clearVal = isCb ? (Array.isArray(vm.model) ? [] : false) : undefined;
+          try { vm.$emit('input', clearVal); } catch (e) { /* ignore */ }
+          try { vm.$emit('change', clearVal); } catch (e) { /* ignore */ }
         }
       }
       // 兜底：清掉视觉选中态（组件实例拿不到时至少界面显示已清空）
@@ -3125,15 +3152,28 @@ ${formatInst}
      * 不使用：class 推断、aria 推断、关键词推断、重试提交
      */
     async tryAutoAnswer(q) {
-      // 1. 缓存
+      // 1. 缓存（只返回答案，由调用方统一应用一次，避免同一答案应用两遍）
       const cached = this.quizCache[q.stemKey];
       if (cached) {
-        // 多选题旧格式修复：如果缓存答案只有 index 没有 indices，丢弃让 AI 重答
-        if (q.qtype === QTYPE.MULTI && cached.answer && typeof cached.answer.index === 'number' && !cached.answer.indices) {
-          logger.warn('Quiz', '多选题缓存为旧格式(单选index)，丢弃缓存，让AI重答:', q.stemKey.substring(0, 50));
-          delete this.quizCache[q.stemKey];
-          Storage.setAnswerCache(this.quizCache);
-          // 不返回，继续往下走到 AI
+        // 多选题缓存必须是有效的 indices 数组；旧的 index/text 缓存不可靠，丢弃让 AI 重答。
+        // 缓存"全选所有选项"的答案也丢弃：这类答案多半是旧版解析错误留下的，不能一直沿用
+        if (q.qtype === QTYPE.MULTI) {
+          const idx = cached.answer && cached.answer.indices;
+          const valid = Array.isArray(idx) && idx.length > 0 &&
+            idx.every(i => Number.isInteger(i) && i >= 0);
+          let optCount = 0;
+          try { optCount = this._getAllOptionTexts(q.el).length; } catch (e) { /* ignore */ }
+          const allCovered = optCount >= 3 && Array.isArray(idx) && idx.length >= optCount;
+          if (!valid || allCovered) {
+            logger.warn('Quiz',
+              allCovered ? '多选题缓存把所有选项都判为正确，丢弃缓存让AI重答:' : '多选题缓存缺少有效的indices数组，丢弃缓存，让AI重答:',
+              q.stemKey.substring(0, 50));
+            delete this.quizCache[q.stemKey];
+            Storage.setAnswerCache(this.quizCache);
+          } else {
+            logger.info('Quiz', '缓存命中:', q.stemKey.substring(0, 40));
+            return cached.answer;
+          }
         // 填空题旧格式修复：缓存答案无 text 字段（旧版误将填空题当选择题处理），丢弃让 AI 重答
         } else if (q.qtype === QTYPE.FILL && cached.answer && !cached.answer.text && !Array.isArray(cached.answer.texts)) {
           logger.warn('Quiz', '填空题缓存为旧格式(无text字段)，丢弃缓存，让AI重答:', q.stemKey.substring(0, 50));
@@ -3142,7 +3182,6 @@ ${formatInst}
           // 不返回，继续往下走到 AI
         } else {
           logger.info('Quiz', '缓存命中:', q.stemKey.substring(0, 40));
-          await this.applyAnswer(q.el, cached.answer, q.qtype);
           return cached.answer;
         }
       }
@@ -3157,7 +3196,6 @@ ${formatInst}
       const stateAnswer = this.findAnswerInGlobalState(q);
       if (stateAnswer !== null) {
         logger.info('Quiz', '全局状态找到答案');
-        await this.applyAnswer(q.el, stateAnswer, q.qtype);
         Storage.addAnswer(q.stemKey, stateAnswer);
         this.quizCache = Storage.getAnswerCache();
         return stateAnswer;
@@ -3167,7 +3205,6 @@ ${formatInst}
       const domAnswer = this.findExplicitDOMAnswer(q);
       if (domAnswer !== null) {
         logger.info('Quiz', 'DOM显式属性找到答案');
-        await this.applyAnswer(q.el, domAnswer, q.qtype);
         Storage.addAnswer(q.stemKey, domAnswer);
         this.quizCache = Storage.getAnswerCache();
         return domAnswer;
@@ -3177,7 +3214,6 @@ ${formatInst}
       const hiddenAnswer = this.findHiddenAnswerData(q.el);
       if (hiddenAnswer !== null) {
         logger.info('Quiz', '隐藏数据找到答案');
-        await this.applyAnswer(q.el, hiddenAnswer, q.qtype);
         Storage.addAnswer(q.stemKey, hiddenAnswer);
         this.quizCache = Storage.getAnswerCache();
         return hiddenAnswer;
@@ -4007,35 +4043,69 @@ ${formatInst}
       if (answer.indices && Array.isArray(answer.indices) && answer.indices.length >= 1) {
         // Element UI 或自定义组件：必须用点击方式（safeSetValue 不会触发 Vue 响应式更新）
         if (isElementUI || !hasStdInputs) {
-          const optionEls = this._getOptionElements(questionEl);
+          let optionEls = this._getOptionElements(questionEl);
 
           if (optionEls.length >= 2) {
-            const wanted = answer.indices.filter(i => i >= 0 && i < optionEls.length);
+            const wanted = [...new Set(answer.indices)].filter(i => i >= 0 && i < optionEls.length);
             if (wanted.length > 0) {
-              const wantSet = new Set(wanted);
-              // 只有存在旧选择时才清空；没答案的干净页面直接勾选，避免"先删再填"的闪烁
-              if (optionEls.some(el => this._isOptionSelected(el))) {
+              // 只信任 Element UI 组件实例状态；读不到时退回旧的"整体清空再勾选"
+              const hasVm = optionEls.every(el => {
+                const lb = el.matches?.('label.el-checkbox, label.el-radio')
+                  ? el : el.querySelector?.('label.el-checkbox, label.el-radio');
+                return !!(lb && lb.__vue__ && typeof lb.__vue__.isChecked === 'boolean');
+              });
+              if (hasVm) {
+                // 已经和答案完全一致：什么都不做（重复点击 checkbox 会把选中态点掉）
+                const states = optionEls.map(el => this._isOptionSelected(el));
+                const exact = states.every((sel, i) => sel === wanted.includes(i));
+                if (exact) return true;
+                // 只取消答案之外的已选项；答案内的已选项保持不动，避免"先全清再全选"的闪烁和竞态
+                for (let i = 0; i < optionEls.length; i++) {
+                  if (wanted.includes(i) || !states[i]) continue;
+                  optionEls = this._getOptionElements(questionEl);
+                  const el = optionEls[i];
+                  if (!el) continue;
+                  DOM.safeClickOnce(el.querySelector('.el-checkbox__inner, .el-radio__inner') || el);
+                  await DOM.sleep(450);
+                }
+              } else if (optionEls.some(el => this._isOptionSelected(el))) {
                 this._clearChoiceAnswers(questionEl);
                 await DOM.sleep(300);
               }
-              const missed = [];
-              for (let i = 0; i < optionEls.length; i++) {
-                if (!wantSet.has(i)) continue;
+              // 每点一项都重新取选项元素：考试页作答后可能重渲染，缓存的旧引用会失效
+              for (const i of wanted) {
+                optionEls = this._getOptionElements(questionEl);
                 const el = optionEls[i];
+                if (!el) continue;
                 // 已经选中就跳过：checkbox 再点一次会取消选中
                 if (this._isOptionSelected(el)) continue;
-                const inner = el.querySelector('.el-radio__inner, .el-checkbox__inner, [class*="check"], [class*="select"], i, svg, [class*="icon"], [class*="toggle"]');
-                // 每个选项只点一次。不要检测失败就重试：checkbox 每点一次切换一次，
-                // 重试会让选项在"选中/取消"之间反复切换（用户看到反复填写又删除）
-                DOM.safeClickOnce(inner || el);
-                await DOM.sleep(180);
-                if (!this._isOptionSelected(el)) missed.push(i + 1);
+                const inner = el.querySelector('.el-checkbox__inner, .el-radio__inner') || el;
+                // 每个选项只点一次，不补点：checkbox 每点一次切换一次，补点会来回闪烁
+                DOM.safeClickOnce(inner);
+                // 间隔放长，给考试系统自己的保存请求留出时间，避免连点导致保存丢失
+                await DOM.sleep(450);
               }
+              await DOM.sleep(600);
+              // 复核：只把"组件状态明确为未选中"当作失败。拿不到组件状态时不做否定判断，
+              // 否则误重试会把已经选上的选项再点一次，反而取消选中
+              optionEls = this._getOptionElements(questionEl);
+              const missed = wanted.filter(i => {
+                const el = optionEls[i];
+                if (!el) return true;
+                const lb = el.matches?.('label.el-checkbox, label.el-radio')
+                  ? el : el.querySelector?.('label.el-checkbox, label.el-radio');
+                const vm = lb && lb.__vue__;
+                if (vm && typeof vm.isChecked === 'boolean') return vm.isChecked === false;
+                return false;
+              });
               if (missed.length > 0) {
-                // 不再补点，避免来回切换；未生效的题可稍后用 ↻ 重答
-                logger.warn('Quiz', `多选第 ${missed.join('、')} 项点击后未检测到选中状态，已停止重试以免闪烁`);
+                logger.warn('Quiz', `多选第 ${missed.map(i => i + 1).join('、')} 项点击后未选中，交给文本兜底`);
+                this.ui.log(`⚠️ 多选有 ${missed.length} 项点击后未生效，稍后自动重试`);
+                return false;
               }
-              await DOM.sleep(200);
+              if (optionEls.length >= 3 && wanted.length >= optionEls.length) {
+                this.ui.log(`⚠️ 多选题 AI 判定全部 ${optionEls.length} 个选项都正确，请核对：${(DOM.getText(questionEl) || '').substring(0, 30)}`);
+              }
               return true;
             }
           }
@@ -4062,6 +4132,9 @@ ${formatInst}
           let anyOk = false;
           for (const idx of answer.indices) {
             if (idx >= opts.length) continue;
+            // 已选中的选项绝不重复点击：checkbox 再点一次就是取消选中
+            const cur = this._getOptionElements(questionEl);
+            if (cur[idx] && this._isOptionSelected(cur[idx])) { anyOk = true; continue; }
             for (let attempt = 0; attempt < 3; attempt++) {
               const found = this._clickByText(questionEl, opts[idx]);
               if (found) {
@@ -4084,6 +4157,7 @@ ${formatInst}
         if (valid.length >= 2) {
           for (const idx of answer.indices) {
             if (idx < valid.length) {
+              if (this._isOptionSelected(valid[idx])) continue;
               DOM.safeClickOnce(valid[idx]);
               await DOM.sleep(100);
             }
@@ -6923,5 +6997,5 @@ ${formatInst}
 
   init();
 
-  logger.info('Main', '长江雨课堂自动刷课助手 v3.4.1 已加载');
+  logger.info('Main', '长江雨课堂自动刷课助手 v3.4.2 已加载');
 })();
